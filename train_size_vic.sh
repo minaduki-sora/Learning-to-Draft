@@ -1,15 +1,15 @@
 export CUDA_VISIBLE_DEVICES=$1
 
 # Model Paths
-base_model_path="/home/majunjie/code/weights/hf/Meta-Llama-3.1-8B-Instruct"
-ea_model_path="/home/majunjie/code/weights/eagle/EAGLE3-LLaMA3.1-Instruct-8B"
-depth_model="/home/majunjie/code/Learning-to-Draft/checkpoints/depth_llama3_1.zip" # Leave empty to use default 60 tokens
-rl_checkpoint_path="/home/majunjie/code/Learning-to-Draft/checkpoints/size_llama3_1.zip"  # Leave empty to start from scratch
+base_model_path="/home/majunjie/code/weights/hf/vicuna-13b-v1.3"
+ea_model_path="/home/majunjie/code/weights/eagle/EAGLE3-Vicuna1.3-13B"
+depth_model="" # Leave empty to use default 60 tokens
+rl_checkpoint_path=""  # Leave empty to start from scratch
 
 # Data and Save Directories
 data_dir="./eagle/data"
 dataset_train="humaneval"
-save_path="./checkpoints"
+save_path="./checkpoints/vicuna/size"
 
 # RL Hyperparameters
 total_timesteps=100000

@@ -12,6 +12,7 @@ import numpy as np
 import torch
 import random # Import random for sampling
 import time # Make sure time is imported
+from fastchat.model import get_conversation_template
 
 try:
     from ..model.ea_model import EaModel
@@ -570,7 +571,8 @@ if __name__ == '__main__':
         total_token=60,
         use_eagle3=True,
         use_dyn_len=False,
-    ).to("cuda")
+        device_map="auto"
+    )#.to("cuda")
     model.eval()
     tokenizer = model.get_tokenizer()
 
@@ -583,12 +585,20 @@ if __name__ == '__main__':
         with open(dataset_path, "r") as f:
             for line in f:
                 data = json.loads(line)
-                messages = [
-                    {"role": "system",
-                    "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
-                    {"role": "user", "content": data["turns"][0]}
-                ]
-                prompt_start = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                if tokenizer.chat_template is not None:
+                    # Llama-3 style
+                    messages = [
+                        {"role": "system",
+                        "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
+                        {"role": "user", "content": data["turns"][0]}
+                    ]
+                    prompt_start = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                else:
+                    # Vicuna style (same as Eagle3 eval script)
+                    conv = get_conversation_template("vicuna")
+                    conv.append_message(conv.roles[0], data["turns"][0])
+                    conv.append_message(conv.roles[1], None)
+                    prompt_start = conv.get_prompt()
                 input_ids = tokenizer.encode(prompt_start, add_special_tokens=False, return_tensors="pt")
                 if input_ids.shape[1] <= 1748:
                     input_ids_list.append(input_ids)

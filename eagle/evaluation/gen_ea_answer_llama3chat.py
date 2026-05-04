@@ -342,15 +342,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ea-model-path",
         type=str,
-        default="/home/zhenghan/data/pretrain/yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
+        default="/home/majunjie/code/weights/eagle/EAGLE3-LLaMA3.1-Instruct-8B",
         help="The path to the weights. This can be a local folder or a Hugging Face repo ID.",
     )
-    parser.add_argument("--base-model-path", type=str, default="/home/zhenghan/data/pretrain/meta-llama/Llama-3.1-8B-Instruct",
+    parser.add_argument("--base-model-path", type=str, default="/home/majunjie/code/weights/hf/Meta-Llama-3.1-8B-Instruct",
                         help="1")
     parser.add_argument(
         "--load-in-8bit", action="store_false", help="Use 8-bit quantization"
     )
-    parser.add_argument("--model-id", type=str, default="llama3p18brebuttal")
+    parser.add_argument("--model-id", type=str, default="llama3p18b_ltd")
     parser.add_argument(
         "--bench-name",
         type=str,

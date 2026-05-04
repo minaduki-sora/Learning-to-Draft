@@ -1,15 +1,15 @@
-DATASETS=(alpaca mt_bench qa gsm8k)
-Depth_Policy=$1
-Size_Policy=$2
+DATASETS=(alpaca mt_bench mbpp gsm8k)
+Depth_Policy="/home/majunjie/code/Learning-to-Draft/checkpoints/llama3_final/depth_llama3_2.zip"
+Size_Policy="/home/majunjie/code/Learning-to-Draft/checkpoints/llama3_final/size_llama3_2.zip"
 
 
 for data in "${DATASETS[@]}"; do
     echo "  -> 正在运行数据集: $data"
     
-    CUDA_VISIBLE_DEVICES=0 python -m eagle.evaluation.gen_ea_answer_llama3chat \
+    CUDA_VISIBLE_DEVICES=1 python -m eagle.evaluation.gen_ea_answer_llama3chat \
         --bench-name "$data" \
         --depth 8 \
-        --temperature 0 \
+        --temperature 1 \
         --num-choices 1 \
         --total-token 60 \
         --use_dyn_depth \
