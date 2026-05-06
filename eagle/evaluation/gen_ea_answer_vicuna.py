@@ -302,15 +302,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ea-model-path",
         type=str,
-        default="/home/v-jiebzhang/hf_models/Eagle3_vicuna_13b_v13",
+        default="/home/majunjie/code/weights/eagle/EAGLE3-Vicuna1.3-13B",
         help="The path to the weights. This can be a local folder or a Hugging Face repo ID.",
     )
-    parser.add_argument("--base-model-path", type=str, default="/home/v-jiebzhang/hf_models/vicuna_13b_v13",
+    parser.add_argument("--base-model-path", type=str, default="/home/majunjie/code/weights/hf/vicuna-13b-v1.3",
                         help="1")
     parser.add_argument(
         "--load-in-8bit", action="store_false", help="Use 8-bit quantization"
     )
-    parser.add_argument("--model-id", type=str, default="ess-vicuna-70b-fp16")
+    parser.add_argument("--model-id", type=str, default="ltd-vicuna-13b-fp16")
     parser.add_argument(
         "--bench-name",
         type=str,

@@ -1,6 +1,6 @@
 DATASETS=(alpaca mt_bench mbpp gsm8k)
-Depth_Policy="/home/majunjie/code/Learning-to-Draft/checkpoints/llama3_final/depth_llama3_2.zip"
-Size_Policy="/home/majunjie/code/Learning-to-Draft/checkpoints/llama3_final/size_llama3_2.zip"
+Depth_Policy="/home/majunjie/code/Learning-to-Draft/checkpoints/llama3_sd/ppo_speculative_decoder_controller_v1_single_action.zip"
+Size_Policy="/home/majunjie/code/Learning-to-Draft/checkpoints/llama3_final/size_llama3_1.zip"
 
 
 for data in "${DATASETS[@]}"; do

@@ -3,7 +3,7 @@ export CUDA_VISIBLE_DEVICES=$1
 # Model Paths
 base_model_path="/home/majunjie/code/weights/hf/vicuna-13b-v1.3"
 ea_model_path="/home/majunjie/code/weights/eagle/EAGLE3-Vicuna1.3-13B"
-rl_token_model_path="" # Leave empty to use default 60 tokens
+rl_token_model_path="/home/majunjie/code/Learning-to-Draft/checkpoints/vicuna/size/size_vicuna_1.zip" # Leave empty to use default 60 tokens
 rl_checkpoint_path=""  # Leave empty to start from scratch
 
 # Data and Save Directories
@@ -12,7 +12,7 @@ dataset_train="humaneval"
 save_path="./checkpoints/vicuna/depth/"
 
 # RL Hyperparameters
-total_timesteps=100000
+total_timesteps=1000000
 batch_size=64
 n_steps=128
 lr=3e-4

@@ -78,7 +78,21 @@ parser.add_argument("--ent_coef", type=float, default=0)
 parser.add_argument("--dataset_train", type=str, default="humaneval")
 parser.add_argument('--pi_arch', type=int, nargs='+', default=[512, 256], help="Policy network (pi) architecture. Example: --pi_arch 512 256")
 parser.add_argument('--vf_arch', type=int, nargs='+', default=[1024, 512], help="Value network (vf) architecture. Example: --vf_arch 1024 512")
+# ===== 多卡参数 =====
+parser.add_argument("--max_memory_gpu", type=str, default="23GiB", help="Max GPU memory per visible device, e.g. '23GiB'")
+parser.add_argument("--max_memory_cpu", type=str, default="60GiB", help="Max CPU offload memory, e.g. '60GiB'")
+
 args=parser.parse_args()
+
+def build_max_memory(gpu_str, cpu_str):
+    """
+    根据 CUDA_VISIBLE_DEVICES 构建 max_memory dict。
+    所有可见 GPU 分配相同显存，确保 accelerate 尽量平铺而非跨卡切层。
+    """
+    num_gpus = torch.cuda.device_count()
+    max_memory = {i: gpu_str for i in range(num_gpus)}
+    max_memory["cpu"] = cpu_str
+    return max_memory
 
 def adawm_schedule(initial_lr: float, warmup_steps: int, total_timesteps: int):
     def func(progress_remaining: float) -> float:
@@ -101,7 +115,7 @@ class CustomTensorboardCallback(BaseCallback):
         if "infos" in self.locals and self.locals["infos"]:
             for info in self.locals["infos"]:
                 log_data = {}
-                
+
                 if "token_right" in info:
                     log_data["custom/token_right"] = info["token_right"]
                 if "t_draft" in info:
@@ -126,7 +140,7 @@ class CustomTensorboardCallback(BaseCallback):
             if self.verbose > 0:
                 print(f"Saving model to {save_path} at timestep {current_timesteps}")
             self.last_saved_timestep = current_timesteps
-            
+
         return True
 
 def load_rl_token_model(model_path):
@@ -147,14 +161,15 @@ class SpeculativeDecodingEnv(gym.Env):
         super(SpeculativeDecodingEnv, self).__init__()
 
         self.model = model
-        self.device = next(model.parameters()).device # Get device from model
+        # self.device = next(model.parameters()).device # Get device from model
+        self.device = model.ea_layer.embed_tokens.weight.device
         self.input_ids_list = [torch.tensor(ids, dtype=torch.long, device=self.device) for ids in input_ids_list] # Move to device
         if not self.input_ids_list:
             raise ValueError("input_ids_list cannot be empty.")
-        
+
         self.current_input_ids = None
         self.logits_processor = logits_processor
-        self.d_max = 2  
+        self.d_max = 2
         self.finished_overall_generation = True
         self.action_space = spaces.Discrete(self.d_max)
         self.obs_size = (128)
@@ -170,7 +185,7 @@ class SpeculativeDecodingEnv(gym.Env):
         self.entropy_exact = []
         self.cu_entropy_for_obs = None
         self.cu_scores_for_obs = None
-        
+
         # 这里会根据 args.rl_token_model_path 决定是加载模型还是返回 None
         self.rl_token = load_rl_token_model(args.rl_token_model_path)
         self.ea_layer_top_k = self.model.ea_layer.top_k # Store ea_layer's top_k (e.g. 10)
@@ -179,7 +194,7 @@ class SpeculativeDecodingEnv(gym.Env):
         obs = np.zeros(self.observation_space_token.shape, dtype=np.float32)
         offset = 0
         hidden_states = self.real_hidden_state_for_obs
-        
+
         draft_position_ids = self.cnet_step / 10.0
         position_ids = self.current_input_ids.shape[1] / 1000.0
         scores = torch.cat(self.scores_list, dim=0).view(-1)
@@ -187,11 +202,11 @@ class SpeculativeDecodingEnv(gym.Env):
         scores_np = scores.cpu().detach().numpy().flatten()
         obs[offset:offset + len(scores_np)] = scores_np
         offset += 1210
-        
+
         pos_ids_np = np.full(29, position_ids)
         obs[offset : offset + 29] = pos_ids_np
         offset += 29
-        
+
         draft_pos_ids_np = np.full(29, draft_position_ids)
         obs[offset : offset + 29] = draft_pos_ids_np
         return obs
@@ -205,7 +220,7 @@ class SpeculativeDecodingEnv(gym.Env):
         if self.cu_scores_for_obs!=None:
             last_hidden_state_np = self.cu_scores_for_obs.cpu().detach().numpy().flatten()
             obs[offset : offset + len(last_hidden_state_np)] = last_hidden_state_np
-            
+
         offset+=100
         obs[offset : offset +14] = position_ids
         offset+=14
@@ -222,8 +237,8 @@ class SpeculativeDecodingEnv(gym.Env):
     def _prepare_for_next_topk_cycle(self, accepted_hidden_state_base, next_token_sampled):
         self.time=0
         begin_time=time.time()
-        self.hidden_states_for_topk_ea_layer = accepted_hidden_state_base 
-        
+        self.hidden_states_for_topk_ea_layer = accepted_hidden_state_base
+
         self.input_ids_for_topk_first_pass = torch.cat(
             (self.current_input_ids, next_token_sampled.to(self.current_input_ids.device)), dim=1
         )
@@ -232,61 +247,61 @@ class SpeculativeDecodingEnv(gym.Env):
 
         self.scores_list = []
         self.parents_list = []
-        self.ss_token_list = [] 
+        self.ss_token_list = []
 
         _input_ids_for_ea_layer_first_iter = self.input_ids_for_topk_first_pass[:, 1:]
         self.len_posi_for_topk_loop = _input_ids_for_ea_layer_first_iter.shape[1]
 
-        self.model.ea_layer.reset() 
+        self.model.ea_layer.reset()
 
         if hasattr(self.model.ea_layer, "stable_kv") and self.model.ea_layer.stable_kv is not None:
             kv_len = self.model.ea_layer.stable_kv[0][0].shape[2]
             out_hidden, past_key_values_ealayer = self.model.ea_layer(
-                self.hidden_states_for_topk_ea_layer, 
+                self.hidden_states_for_topk_ea_layer,
                 input_ids=_input_ids_for_ea_layer_first_iter[:, kv_len:],
                 past_key_values=self.model.ea_layer.stable_kv, use_cache=True
             )
         else:
             out_hidden, past_key_values_ealayer = self.model.ea_layer(
-                self.hidden_states_for_topk_ea_layer, 
+                self.hidden_states_for_topk_ea_layer,
                 input_ids=_input_ids_for_ea_layer_first_iter, use_cache=True
             )
-        
+
         self.model.ea_layer.stable_kv = past_key_values_ealayer
-        self.current_past_key_values_ealayer = past_key_values_ealayer 
-        
+        self.current_past_key_values_ealayer = past_key_values_ealayer
+
         last_hidden_ea_layer = out_hidden[:, -1]
         self.input_hidden_for_action = last_hidden_ea_layer[None].repeat(1, 10, 1)
         last_headout = self.model.ea_layer.lm_head(self.model.ea_layer.norm(last_hidden_ea_layer))
         last_p = self.model.ea_layer.logsoftmax(last_headout)
-        top = torch.topk(last_p, self.ea_layer_top_k, dim=-1) 
+        top = torch.topk(last_p, self.ea_layer_top_k, dim=-1)
         topk_index, topk_p = top.indices, top.values
-        
-        current_scores_for_topk_loop = topk_p[0] 
-        self.scores_list.append(current_scores_for_topk_loop[None]) 
-        self.current_scores_for_topk_loop_obs = current_scores_for_topk_loop 
+
+        current_scores_for_topk_loop = topk_p[0]
+        self.scores_list.append(current_scores_for_topk_loop[None])
+        self.current_scores_for_topk_loop_obs = current_scores_for_topk_loop
 
         self.parents_list.append(torch.zeros(1, dtype=torch.long, device=current_scores_for_topk_loop.device))
-        
+
         if self.model.ea_layer.config.vocab_size == self.model.ea_layer.config.draft_vocab_size:
             self.ss_token_list.append(topk_index)
             input_ids_for_next_depth_iter = topk_index
-        else: 
+        else:
             self.ss_token_list.append(topk_index + self.model.ea_layer.d2t[topk_index])
             input_ids_for_next_depth_iter = topk_index + self.model.ea_layer.d2t[topk_index]
-        
+
         self.current_input_ids_for_topk_depth_iter = input_ids_for_next_depth_iter
         self.current_input_hidden_for_topk_depth_iter = last_hidden_ea_layer[None].repeat(1, self.ea_layer_top_k, 1)
         self.current_tree_mask_for_topk_loop = self.model.ea_layer.tree_mask_init.clone().to(self.device)
         self.current_topk_cs_index_for_loop = torch.arange(self.ea_layer_top_k, device=self.model.ea_layer.embed_tokens.weight.device)
 
         self.real_position_ids_for_obs = torch.tensor([self.input_ids_for_topk_first_pass.shape[1]], device=self.device)
-        
-        self.cnet_step = 0 
+
+        self.cnet_step = 0
         self.time += time.time() - begin_time
 
     def reset(self, seed=None, options=None):
-        super().reset(seed=seed) 
+        super().reset(seed=seed)
         if self.finished_overall_generation:
             self.current_episode_rewards = []
             self.entropy_exact=[]
@@ -294,40 +309,40 @@ class SpeculativeDecodingEnv(gym.Env):
 
             _current_input_ids_tensor = random.choice(self.input_ids_list)
             self.current_input_ids = _current_input_ids_tensor.clone().to(self.device)
-            self.input_len = self.current_input_ids.shape[1] 
+            self.input_len = self.current_input_ids.shape[1]
 
-            self.model.ea_layer.reset_kv() 
-            
+            self.model.ea_layer.reset_kv()
+
             if hasattr(self.model, "past_key_values") and self.model.past_key_values is not None:
-                reset_past_key_values(self.model.past_key_values) 
+                reset_past_key_values(self.model.past_key_values)
                 self.past_key_values = self.model.past_key_values
                 self.past_key_values_data = self.model.past_key_values_data
                 self.current_length_data = self.model.current_length_data
                 self.current_length_data.zero_()
             else:
                 (self.past_key_values, self.past_key_values_data, self.current_length_data) = initialize_past_key_values(
-                    self.model.base_model, max_length=2048 
+                    self.model.base_model, max_length=2048
                 )
                 self.model.past_key_values = self.past_key_values
                 self.model.past_key_values_data = self.past_key_values_data
                 self.model.current_length_data = self.current_length_data
-            
-            reset_tree_mode(self.model) 
+
+            reset_tree_mode(self.model)
 
             with torch.no_grad():
                 draft_tokens, retrieve_indices_init, tree_mask_init, tree_position_ids_init, _, _, _ = initialize_tree(
                     self.current_input_ids, self.model, self.past_key_values, self.logits_processor
                 )
-                
+
                 self.model.base_model.model.tree_mask = tree_mask_init.to(self.device)
                 draft_tokens = draft_tokens.to(self.device)
 
                 logits_verify, hidden_state_new_verify, _ = tree_decoding(
-                    self.model, draft_tokens, self.past_key_values, 
-                    tree_position_ids_init.to(self.device), 
+                    self.model, draft_tokens, self.past_key_values,
+                    tree_position_ids_init.to(self.device),
                     self.current_input_ids, retrieve_indices_init.to(self.device)
                 )
-                
+
                 padding_init = (torch.zeros(1, 1, dtype=torch.long, device=self.device) - 1)
                 draft_tokens_padded_init = torch.cat((draft_tokens, padding_init), dim=1)
                 candidates_init = draft_tokens_padded_init[0, retrieve_indices_init.to(self.device)]
@@ -351,75 +366,75 @@ class SpeculativeDecodingEnv(gym.Env):
 
                 self.current_length_data.fill_(self.current_input_ids.shape[1])
 
-                retrieve_hidden_state_new = hidden_state_new_verify[:, retrieve_indices_init]
+                retrieve_hidden_state_new = hidden_state_new_verify[:, retrieve_indices_init.to(hidden_state_new_verify.device)]
                 accepted_hidden_state_base = retrieve_hidden_state_new[:, best_candidate_idx_init, :accept_length_init + 1]
                 self.real_hidden_state_for_obs =accepted_hidden_state_base[:, -1, :].unsqueeze(1)
 
                 next_token_sampled= torch.argmax(sample_p_init)
                 next_token_sampled = next_token_sampled[None,None]
-            
-            self.new_token_count = accept_length_init + 1 if accept_length_init >=0 else 0 
+
+            self.new_token_count = accept_length_init + 1 if accept_length_init >=0 else 0
             self._prepare_for_next_topk_cycle(accepted_hidden_state_base, next_token_sampled)
             self.finished_overall_generation=False
         else:
             self._prepare_for_next_topk_cycle(self.accepted_hidden_state_base_for_next_topk, self.next_token_sampled_for_next_topk)
-        
+
         return self._get_obs(), self._get_info()
 
     def step(self, action):
         stop_token_id = self.model.tokenizer.convert_tokens_to_ids("<|eot_id|>") if self.model.tokenizer else -1
-        
+
         self.base_reward=0
-        depth_val_action = action 
+        depth_val_action = action
         reward = 0
         terminated = False
         truncated = False
         info = {}
         start_time_step = time.time()
-        
-        max_runtime_depth_for_ea_layer = 12 
+
+        max_runtime_depth_for_ea_layer = 12
 
         perform_depth_expansion_step = False
         if depth_val_action == 1 and self.cnet_step < max_runtime_depth_for_ea_layer:
             perform_depth_expansion_step = True
-        elif self.cnet_step == 0: 
+        elif self.cnet_step == 0:
             perform_depth_expansion_step = True
 
         if perform_depth_expansion_step:
             topk_time=0
-            self.model.ea_layer.tree_mask = self.current_tree_mask_for_topk_loop 
-            
+            self.model.ea_layer.tree_mask = self.current_tree_mask_for_topk_loop
+
             current_ea_layer_position_ids = self.len_posi_for_topk_loop + self.model.ea_layer.position_ids.to(self.device)
-            
+
             out_hidden, past_key_values_ealayer_new = self.model.ea_layer(
-                self.current_input_hidden_for_topk_depth_iter, 
-                input_ids=self.current_input_ids_for_topk_depth_iter, 
+                self.current_input_hidden_for_topk_depth_iter,
+                input_ids=self.current_input_ids_for_topk_depth_iter,
                 past_key_values=self.current_past_key_values_ealayer,
-                position_ids=current_ea_layer_position_ids, 
+                position_ids=current_ea_layer_position_ids,
                 use_cache=True
             )
             self.len_posi_for_topk_loop += 1
             self.current_past_key_values_ealayer = past_key_values_ealayer_new
 
-            bias1 = self.ea_layer_top_k  if self.cnet_step > 0 else 0 
-            bias2 = max(0, self.cnet_step - 1) 
-            bias = 1 + self.ea_layer_top_k * self.ea_layer_top_k * bias2 + bias1 
+            bias1 = self.ea_layer_top_k  if self.cnet_step > 0 else 0
+            bias2 = max(0, self.cnet_step - 1)
+            bias = 1 + self.ea_layer_top_k * self.ea_layer_top_k * bias2 + bias1
 
             parents = (self.current_topk_cs_index_for_loop + bias)
             self.parents_list.append(parents)
 
-            last_headout = self.model.ea_layer.lm_head(self.model.ea_layer.norm(out_hidden[0])) 
+            last_headout = self.model.ea_layer.lm_head(self.model.ea_layer.norm(out_hidden[0]))
             last_p = self.model.ea_layer.logsoftmax(last_headout)
             top = torch.topk(last_p, self.ea_layer_top_k, dim=-1)
             topk_index, topk_p = top.indices, top.values
 
-            cu_scores = topk_p + self.current_scores_for_topk_loop_obs[:, None] 
+            cu_scores = topk_p + self.current_scores_for_topk_loop_obs[:, None]
 
             topk_cs = torch.topk(cu_scores.view(-1), self.ea_layer_top_k, dim=-1)
             topk_cs_index_new, topk_cs_p_new = topk_cs.indices, topk_cs.values
             self.cu_scores_for_obs = cu_scores.flatten()
-            self.current_scores_for_topk_loop_obs = topk_cs_p_new 
-            self.current_topk_cs_index_for_loop = topk_cs_index_new 
+            self.current_scores_for_topk_loop_obs = topk_cs_p_new
+            self.current_topk_cs_index_for_loop = topk_cs_index_new
 
             out_ids = topk_cs_index_new // self.ea_layer_top_k
             out_ids_device = out_ids.to(self.current_tree_mask_for_topk_loop.device)
@@ -431,24 +446,24 @@ class SpeculativeDecodingEnv(gym.Env):
                 self.ss_token_list.append(topk_index)
                 self.current_input_ids_for_topk_depth_iter = next_input_ids_val
             else:
-                mapped_next_input_ids = next_input_ids_val + self.model.ea_layer.d2t[next_input_ids_val.squeeze()].unsqueeze(0) 
-                self.ss_token_list.append(topk_index + self.model.ea_layer.d2t[topk_index.squeeze()]) 
+                mapped_next_input_ids = next_input_ids_val + self.model.ea_layer.d2t[next_input_ids_val.squeeze()].unsqueeze(0)
+                self.ss_token_list.append(topk_index + self.model.ea_layer.d2t[topk_index.squeeze()])
                 self.current_input_ids_for_topk_depth_iter = mapped_next_input_ids
-            
-            self.scores_list.append(cu_scores) 
+
+            self.scores_list.append(cu_scores)
 
             if self.current_tree_mask_for_topk_loop.shape[2] > 0 and out_ids_device.max() < self.current_tree_mask_for_topk_loop.shape[2]:
                  self.current_tree_mask_for_topk_loop = torch.cat(
-                    (self.current_tree_mask_for_topk_loop[:, :, out_ids_device], 
+                    (self.current_tree_mask_for_topk_loop[:, :, out_ids_device],
                      self.model.ea_layer.tree_mask_init.clone().to(self.device)), dim=3
                  )
             else:
                 print(f"Warning: Tree mask update skipped due to index mismatch or empty mask. Mask shape: {self.current_tree_mask_for_topk_loop.shape}, out_ids_device.max(): {out_ids_device.max() if out_ids_device.numel() > 0 else 'N/A'}")
 
             self.cnet_step += 1
-            self.real_position_ids_for_obs = torch.tensor([self.len_posi_for_topk_loop], device=self.device) 
+            self.real_position_ids_for_obs = torch.tensor([self.len_posi_for_topk_loop], device=self.device)
             self.time += time.time()-start_time_step
-        else: 
+        else:
             if hasattr(self, 'rl_token') and self.rl_token is not None:
                 token_tensor = torch.tensor(self._get_obs_total_tokens(), device="cuda")
                 with torch.no_grad():
@@ -458,31 +473,31 @@ class SpeculativeDecodingEnv(gym.Env):
                 _total_tokens_to_select = 60
 
             _scores_cat_list = torch.cat(self.scores_list, dim=0).view(-1)
-            _ss_token_cat_list = torch.cat(self.ss_token_list, dim=0).view(-1) 
+            _ss_token_cat_list = torch.cat(self.ss_token_list, dim=0).view(-1)
 
             _actual_total_tokens = min(_ss_token_cat_list.shape[0], _total_tokens_to_select)
-            
+
             top_scores_indices = torch.topk(_scores_cat_list, _actual_total_tokens, dim=-1).indices
             top_scores_indices_sorted = torch.sort(top_scores_indices).values
 
             _draft_tokens_flat = _ss_token_cat_list[top_scores_indices_sorted]
-            self.finalized_draft_tokens = torch.cat((self.current_sample_token_for_topk.to(self.device), _draft_tokens_flat), dim=0).unsqueeze(0)
+            self.finalized_draft_tokens = torch.cat((self.current_sample_token_for_topk.to(self.device), _draft_tokens_flat.to(self.device)), dim=0).unsqueeze(0)
 
             _num_final_draft_plus_sample = self.finalized_draft_tokens.shape[1]
-            _draft_parents_flat = torch.cat(self.parents_list, dim=0)[top_scores_indices_sorted // self.ea_layer_top_k].long() 
-            
+            _draft_parents_flat = torch.cat(self.parents_list, dim=0)[top_scores_indices_sorted // self.ea_layer_top_k].long()
+
             _mask_index = torch.searchsorted(top_scores_indices_sorted, _draft_parents_flat - 1, right=False)
-            _mask_index[_draft_parents_flat == 0] = -1 
+            _mask_index[_draft_parents_flat == 0] = -1
             _mask_index = _mask_index + 1
             _mask_index_list_local = _mask_index.tolist()
 
             _tree_mask_bool = torch.eye(_num_final_draft_plus_sample, device=self.device).bool()
-            _tree_mask_bool[:, 0] = True 
+            _tree_mask_bool[:, 0] = True
             for i in range(_actual_total_tokens):
                 current_token_overall_idx = i + 1
-                parent_idx_in_mask_list = _mask_index_list_local[i] if i < len(_mask_index_list_local) else 0 
+                parent_idx_in_mask_list = _mask_index_list_local[i] if i < len(_mask_index_list_local) else 0
                 _tree_mask_bool[current_token_overall_idx].add_(_tree_mask_bool[parent_idx_in_mask_list])
-            
+
             self.finalized_tree_mask = _tree_mask_bool.float()[None, None]
             self.finalized_tree_position_ids = torch.sum(_tree_mask_bool.int(), dim=1) - 1
             max_depth = torch.max(self.finalized_tree_position_ids) + 1
@@ -520,7 +535,7 @@ class SpeculativeDecodingEnv(gym.Env):
             del _mask_index, _mask_index_list_local, noleaf_index, noleaf_num, leaf_num, max_depth, rid
 
             self.finalized_retrieve_indices = retrieve_indices
-        
+
             # --- 2. Main Model Verification ---
             self.model.base_model.model.tree_mask = self.finalized_tree_mask.to(self.device)
             _final_drafts = self.finalized_draft_tokens.to(self.device)
@@ -528,24 +543,24 @@ class SpeculativeDecodingEnv(gym.Env):
             logits_verify, hidden_state_new_verify, _ = tree_decoding(
                 self.model, _final_drafts, self.past_key_values,
                 self.finalized_tree_position_ids.to(self.device),
-                self.current_input_ids, 
+                self.current_input_ids,
                 self.finalized_retrieve_indices.to(self.device)
             )
 
             # --- 3. Evaluate Posterior ---
             padding_verify = (torch.zeros(1, 1, dtype=torch.long, device=self.device) - 1)
             draft_tokens_padded_verify = torch.cat((_final_drafts, padding_verify), dim=1)
-            _candidates_verify = draft_tokens_padded_verify[0, self.finalized_retrieve_indices]
+            _candidates_verify = draft_tokens_padded_verify[0, self.finalized_retrieve_indices.to(self.device)]
 
             best_candidate_idx, accept_length, sample_p = evaluate_posterior(
                 logits_verify, _candidates_verify, self.logits_processor
             )
-            self.accept_length = accept_length 
+            self.accept_length = accept_length
 
             # --- 4. Update Main State (current_input_ids, KV cache) ---
             prev_input_len = self.current_input_ids.shape[1]
             num_accepted_this_verification = 0
-                
+
             accepted_tokens_sequence = _candidates_verify[best_candidate_idx, :self.accept_length + 1]
             prev_input_len = self.current_input_ids.shape[1]
             self.current_input_ids = torch.cat(
@@ -561,13 +576,13 @@ class SpeculativeDecodingEnv(gym.Env):
                 dst = past_key_values_data[..., prev_input_len: prev_input_len + tgt.shape[-2], :]
                 dst.copy_(tgt, non_blocking=True)
             self.current_length_data.fill_(self.current_input_ids.shape[1])
-            
+
             self.new_token_count += num_accepted_this_verification
 
             # --- 5. Prepare for the NEXT topK_generate Cycle ---
-            accepted_hidden_state_base_for_next_topk = torch.empty(0,0,0, device=self.device) 
+            accepted_hidden_state_base_for_next_topk = torch.empty(0,0,0, device=self.device)
             next_token_sampled_for_next_topk = torch.empty(0,0, device=self.device, dtype=torch.long)
-            retrieve_hidden_state_new = hidden_state_new_verify[:, self.finalized_retrieve_indices]
+            retrieve_hidden_state_new = hidden_state_new_verify[:, self.finalized_retrieve_indices.to(hidden_state_new_verify.device)]
             accepted_hidden_state_base_for_next_topk = retrieve_hidden_state_new[:, best_candidate_idx, : self.accept_length + 1]
             next_token_sampled_for_next_topk= torch.argmax(sample_p)
             next_token_sampled_for_next_topk = next_token_sampled_for_next_topk[None,None]
@@ -583,17 +598,17 @@ class SpeculativeDecodingEnv(gym.Env):
                 self.finished_overall_generation = True
             if self.model.tokenizer and self.model.tokenizer.eos_token_id in self.current_input_ids[0, self.input_len:].tolist():
                 self.finished_overall_generation = True
-            if self.current_input_ids.shape[1] >= 1748 : 
+            if self.current_input_ids.shape[1] >= 1748 :
                 self.finished_overall_generation = True
             if self.new_token_count>=256:
                 self.finished_overall_generation = True
-        
+
         info = self._get_info()
         info.update({
             'token_right': float(self.accept_length + 1) if hasattr(self, 'accept_length') and self.accept_length is not None else 0.0,
             't_draft': self.time,
             'base_reward':self.base_reward,
-            'depth_chosen_action': depth_val_action,             
+            'depth_chosen_action': depth_val_action,
             'current_seq_len': self.current_input_ids.shape[1] if self.current_input_ids is not None else 0,
             'reward_current_step': reward
         })
@@ -616,12 +631,15 @@ class SpeculativeDecodingEnv(gym.Env):
 
 if __name__ == '__main__':
     run = wandb.init(
-        project="speculative-decoding-rl",  
-        config=args,                        
-        sync_tensorboard=True,              
-        monitor_gym=True,                   
-        save_code=True,                     
+        project="speculative-decoding-rl",
+        config=args,
+        sync_tensorboard=True,
+        monitor_gym=True,
+        save_code=True,
     )
+
+    max_memory = build_max_memory(args.max_memory_gpu, args.max_memory_cpu)
+    print(f"max_memory config: {max_memory}")
 
     model = EaModel.from_pretrained(
         base_model_path=args.base_model_path,
@@ -633,8 +651,9 @@ if __name__ == '__main__':
         total_token=60,
         use_eagle3=True,
         use_dyn_len=False,
-        device_map="auto"
-    )#.to("cuda")
+        device_map="auto",
+        max_memory=max_memory,
+    )
     model.eval()
     tokenizer = model.get_tokenizer()
 
@@ -664,7 +683,7 @@ if __name__ == '__main__':
                 input_ids = tokenizer.encode(prompt_start, add_special_tokens=False, return_tensors="pt")
                 if input_ids.shape[1] <= 1748:
                     input_ids_list.append(input_ids)
-    
+
     # Initialize Environment
     logits_processor = None
     env = SpeculativeDecodingEnv(model, logits_processor, input_ids_list)
@@ -679,14 +698,14 @@ if __name__ == '__main__':
         args.warmup_timesteps,
         args.total_timesteps
     )
-    
+
     checkpoint_path = args.rl_checkpoint_path
     if checkpoint_path and os.path.exists(checkpoint_path):
         print(f"Loading checkpoint from: {checkpoint_path}")
         model_rl = PPO.load(
             checkpoint_path,
             env=env,
-            learning_rate=learning_rate_schedule, 
+            learning_rate=learning_rate_schedule,
             tensorboard_log=os.path.join(args.save_path,"ppo_speculative_tensorboard"),
             verbose=1,
         )
@@ -696,16 +715,16 @@ if __name__ == '__main__':
             env,
             policy_kwargs=policy_kwargs,
             verbose=1,
-            n_steps=args.n_steps, 
-            batch_size=args.batch_size, 
-            n_epochs=args.n_epochs, 
-            gamma=args.gamma, 
+            n_steps=args.n_steps,
+            batch_size=args.batch_size,
+            n_epochs=args.n_epochs,
+            gamma=args.gamma,
             tensorboard_log=os.path.join(args.save_path,"ppo_speculative_tensorboard"),
             device=device,
-            ent_coef=args.ent_coef, 
+            ent_coef=args.ent_coef,
             learning_rate=learning_rate_schedule,
         )
-        
+
     custom_tensorboard_callback = CustomTensorboardCallback(save_freq=args.eval_freq)
     wandb_callback = WandbCallback(
         gradient_save_freq=0,
@@ -714,8 +733,8 @@ if __name__ == '__main__':
     callback_list = CallbackList([custom_tensorboard_callback, wandb_callback])
     print("\nStarting RL training with single action (total_tokens)...")
     model_rl.learn(
-        total_timesteps=args.total_timesteps, 
-        progress_bar=True, 
+        total_timesteps=args.total_timesteps,
+        progress_bar=True,
         callback=callback_list
     )
     print("RL training finished.")

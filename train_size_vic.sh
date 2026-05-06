@@ -21,6 +21,7 @@ python3 -m rl.rl_total \
     --base_model_path ${base_model_path} \
     --ea_model_path ${ea_model_path} \
     --depth_model "${depth_model}" \
+    --max_memory_gpu "23GiB" --max_memory_cpu "60GiB"\
     --rl_checkpoint_path "${rl_checkpoint_path}" \
     --data_dir ${data_dir} \
     --dataset_train ${dataset_train} \

@@ -326,6 +326,7 @@ def tree_decoding(
             outputs["hidden_states"] = [x.to(ea_device) for x in outputs["hidden_states"]]
         hidden_state = torch.cat(outputs["hidden_states"], dim=-1)
 
+    retrieve_indices = retrieve_indices.to(tree_logits.device)
     logits = tree_logits[0, retrieve_indices]
     return logits, hidden_state, outputs
 

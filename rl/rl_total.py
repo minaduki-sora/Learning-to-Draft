@@ -81,8 +81,21 @@ parser.add_argument("--dataset_train", type=str, default="humaneval")
 parser.add_argument('--pi_arch', type=int, nargs='+', default=[512, 256], help="Policy network (pi) architecture. Example: --pi_arch 512 256")
 parser.add_argument('--vf_arch', type=int, nargs='+', default=[1024, 512], help="Value network (vf) architecture. Example: --vf_arch 1024 512")
 parser.add_argument("--use_dyn_depth", action="store_true")
+# ===== 多卡参数 =====
+parser.add_argument("--max_memory_gpu", type=str, default="23GiB", help="Max GPU memory per visible device, e.g. '23GiB'")
+parser.add_argument("--max_memory_cpu", type=str, default="60GiB", help="Max CPU offload memory, e.g. '60GiB'")
 
 args=parser.parse_args()
+
+def build_max_memory(gpu_str, cpu_str):
+    """
+    根据 CUDA_VISIBLE_DEVICES 构建 max_memory dict。
+    所有可见 GPU 分配相同显存，确保 accelerate 尽量平铺而非跨卡切层。
+    """
+    num_gpus = torch.cuda.device_count()
+    max_memory = {i: gpu_str for i in range(num_gpus)}
+    max_memory["cpu"] = cpu_str
+    return max_memory
 
 # Dummy Adawm Schedule for completeness
 def adawm_schedule(initial_lr: float, warmup_steps: int, total_timesteps: int):
@@ -110,7 +123,7 @@ class CustomTensorboardCallback(BaseCallback):
         if "infos" in self.locals and self.locals["infos"]:
             for info in self.locals["infos"]:
                 log_data = {}
-                
+
                 if "token_right" in info:
                     log_data["custom/token_right"] = info["token_right"]
                 if "t_draft" in info:
@@ -134,7 +147,7 @@ class CustomTensorboardCallback(BaseCallback):
             if self.verbose > 0:
                 print(f"Saving model to {save_path} at timestep {current_timesteps}")
             self.last_saved_timestep = current_timesteps
-            
+
         return True
 
 def load_rl_depth_model(model_path):
@@ -154,7 +167,8 @@ class SpeculativeDecodingEnv(gym.Env):
         super(SpeculativeDecodingEnv, self).__init__()
 
         self.model = model
-        self.device = next(model.parameters()).device
+        # self.device = next(model.parameters()).device
+        self.device = model.ea_layer.embed_tokens.weight.device
         self.input_ids_list = input_ids_list
         if not self.input_ids_list:
             raise ValueError("input_ids_list cannot be empty.")
@@ -167,7 +181,7 @@ class SpeculativeDecodingEnv(gym.Env):
         self.depth_model = None
         if args.use_dyn_depth:
             self.depth_model = load_rl_depth_model(model_path=args.depth_model)
-        
+
         self.obs_size = 1268
         self.obs_size_depth = 128
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.obs_size,), dtype=np.float32)
@@ -188,7 +202,7 @@ class SpeculativeDecodingEnv(gym.Env):
         if self.cu_scores_for_obs!=None:
             last_hidden_state_np = self.cu_scores_for_obs.cpu().detach().numpy().flatten()
             obs[offset : offset + len(last_hidden_state_np)] = last_hidden_state_np
-            
+
         offset+=100
         obs[offset : offset +14] = position_ids
         offset+=14
@@ -199,11 +213,11 @@ class SpeculativeDecodingEnv(gym.Env):
         obs = np.zeros(self.observation_space.shape, dtype=np.float32)
         offset = 0
         hidden_states = self.real_hidden_state_for_obs
-        
+
         draft_position_ids = self.cnet_step / 10.0
         position_ids = self.current_input_ids.shape[1] / 1000.0
         scores = torch.cat(self.scores_list, dim=0).view(-1)
-        
+
         last_hidden_state = hidden_states.squeeze()[-4096:]
         if last_hidden_state.ndim == 0:
             last_hidden_state = last_hidden_state.unsqueeze(0)
@@ -213,11 +227,11 @@ class SpeculativeDecodingEnv(gym.Env):
         scores_np = scores.cpu().detach().numpy().flatten()
         obs[offset:offset + len(scores_np)] = scores_np
         offset += 1210
-        
+
         pos_ids_np = np.full(29, position_ids)
         obs[offset : offset + 29] = pos_ids_np
         offset += 29
-        
+
         draft_pos_ids_np = np.full(29, draft_position_ids)
         obs[offset : offset + 29] = draft_pos_ids_np
         offset+=29
@@ -233,7 +247,7 @@ class SpeculativeDecodingEnv(gym.Env):
     def _prepare_for_drafting(self, accepted_hidden_state_base, next_token_sampled):
         self.time = 0
         begin_time = time.time()
-        
+
         self.hidden_states_for_topk_ea_layer = accepted_hidden_state_base
         self.input_ids_for_topk_first_pass = torch.cat(
             (self.current_input_ids, next_token_sampled.to(self.current_input_ids.device)), dim=1
@@ -243,7 +257,7 @@ class SpeculativeDecodingEnv(gym.Env):
         self.scores_list = []
         self.parents_list = []
         self.ss_token_list = []
-        
+
         _input_ids_for_ea_layer_first_iter = self.input_ids_for_topk_first_pass[:, 1:]
         self.len_posi_for_topk_loop = _input_ids_for_ea_layer_first_iter.shape[1]
 
@@ -251,7 +265,7 @@ class SpeculativeDecodingEnv(gym.Env):
 
         kv_len = self.model.ea_layer.stable_kv[0][0].shape[2] if hasattr(self.model.ea_layer, "stable_kv") and self.model.ea_layer.stable_kv is not None else 0
         input_ids_for_forward = _input_ids_for_ea_layer_first_iter[:, kv_len:] if kv_len > 0 else _input_ids_for_ea_layer_first_iter
-        
+
         out_hidden, past_key_values_ealayer = self.model.ea_layer(
             self.hidden_states_for_topk_ea_layer,
             input_ids=input_ids_for_forward,
@@ -261,13 +275,13 @@ class SpeculativeDecodingEnv(gym.Env):
 
         self.model.ea_layer.stable_kv = past_key_values_ealayer
         self.current_past_key_values_ealayer = past_key_values_ealayer
-        
+
         last_hidden_ea_layer = out_hidden[:, -1]
         last_headout = self.model.ea_layer.lm_head(self.model.ea_layer.norm(last_hidden_ea_layer))
         last_p = self.model.ea_layer.logsoftmax(last_headout)
         top = torch.topk(last_p, self.ea_layer_top_k, dim=-1)
         topk_index, topk_p = top.indices, top.values
-        
+
         current_scores_for_topk_loop = topk_p[0]
         self.scores_list.append(current_scores_for_topk_loop[None])
         self.current_scores_for_topk_loop_obs = current_scores_for_topk_loop
@@ -285,7 +299,7 @@ class SpeculativeDecodingEnv(gym.Env):
         self.current_input_hidden_for_topk_depth_iter = last_hidden_ea_layer[None].repeat(1, self.ea_layer_top_k, 1)
         self.current_tree_mask_for_topk_loop = self.model.ea_layer.tree_mask_init.clone().to(self.device)
         self.current_topk_cs_index_for_loop = torch.arange(self.ea_layer_top_k, device=self.model.ea_layer.embed_tokens.weight.device)
-        
+
         self.real_position_ids_for_obs = torch.tensor([self.input_ids_for_topk_first_pass.shape[1]], device=self.device)
         self.cnet_step = 0
         self.time += time.time() - begin_time
@@ -339,7 +353,7 @@ class SpeculativeDecodingEnv(gym.Env):
                 mapped_tokens = next_input_ids_val + self.model.ea_layer.d2t[next_input_ids_val.squeeze()].unsqueeze(0)
                 self.ss_token_list.append(topk_index + self.model.ea_layer.d2t[topk_index.squeeze()])
                 self.current_input_ids_for_topk_depth_iter = mapped_tokens
-            
+
             self.scores_list.append(cu_scores)
 
             if self.current_tree_mask_for_topk_loop.shape[2] > 0 and out_ids.max() < self.current_tree_mask_for_topk_loop.shape[2]:
@@ -379,7 +393,7 @@ class SpeculativeDecodingEnv(gym.Env):
                 self.model.past_key_values = self.past_key_values
                 self.model.past_key_values_data = self.past_key_values_data
                 self.model.current_length_data = self.current_length_data
-            
+
             reset_tree_mode(self.model)
 
             with torch.no_grad():
@@ -391,9 +405,9 @@ class SpeculativeDecodingEnv(gym.Env):
                     self.model, draft_tokens.to(self.device), self.past_key_values,
                     tree_position_ids_init.to(self.device), self.current_input_ids, retrieve_indices_init.to(self.device)
                 )
-                
+
                 padding_init = torch.full((1, 1), -1, dtype=torch.long, device=self.device)
-                draft_tokens_padded_init = torch.cat((draft_tokens, padding_init), dim=1)
+                draft_tokens_padded_init = torch.cat((draft_tokens.to(self.device), padding_init), dim=1)
                 candidates_init = draft_tokens_padded_init[0, retrieve_indices_init.to(self.device)]
 
                 best_candidate_idx_init, accept_length_init, sample_p_init = evaluate_posterior(
@@ -413,36 +427,36 @@ class SpeculativeDecodingEnv(gym.Env):
                     dst.copy_(tgt, non_blocking=True)
 
                 self.current_length_data.fill_(self.current_input_ids.shape[1])
-                retrieve_hidden_state_new = hidden_state_new_verify[:, retrieve_indices_init]
+                retrieve_hidden_state_new = hidden_state_new_verify[:, retrieve_indices_init.to(hidden_state_new_verify.device)]
                 accepted_hidden_state_base = retrieve_hidden_state_new[:, best_candidate_idx_init, :accept_length_init + 1]
                 self.real_hidden_state_for_obs = accepted_hidden_state_base[:, -1, :].unsqueeze(1)
                 next_token_sampled = torch.argmax(sample_p_init).unsqueeze(0).unsqueeze(0)
-                
+
             self.new_token_count += accept_length_init + 1
             self._prepare_for_drafting(accepted_hidden_state_base, next_token_sampled)
             self.finished_overall_generation = False
         else:
             self._prepare_for_drafting(self.accepted_hidden_state_base_for_next_topk, self.next_token_sampled_for_next_topk)
-        
+
         self._perform_random_depth_expansion()
 
         return self._get_obs(), self._get_info()
 
     def step(self, action):
         start_time_step = time.time()
-        
+
         total_token_val_action = (action + 1)*10
         # --- 1. Finalize Draft Based on Action ---
         _scores_cat_list = torch.cat(self.scores_list, dim=0).view(-1)
         _ss_token_cat_list = torch.cat(self.ss_token_list, dim=0).view(-1)
         _actual_total_tokens = min(_ss_token_cat_list.shape[0], total_token_val_action)
-        
+
         top_scores_indices = torch.topk(_scores_cat_list, _actual_total_tokens, dim=-1).indices
         top_scores_indices_sorted = torch.sort(top_scores_indices).values
 
         _draft_tokens_flat = _ss_token_cat_list[top_scores_indices_sorted]
-        self.finalized_draft_tokens = torch.cat((self.current_sample_token_for_topk.to(self.device), _draft_tokens_flat), dim=0).unsqueeze(0)
-        
+        self.finalized_draft_tokens = torch.cat((self.current_sample_token_for_topk.to(self.device), _draft_tokens_flat.to(self.device)), dim=0).unsqueeze(0)
+
         _num_final_draft_plus_sample = self.finalized_draft_tokens.shape[1]
         _draft_parents_flat = torch.cat(self.parents_list, dim=0)[top_scores_indices_sorted // self.ea_layer_top_k].long()
         _mask_index = torch.searchsorted(top_scores_indices_sorted, _draft_parents_flat - 1, right=False)
@@ -455,7 +469,7 @@ class SpeculativeDecodingEnv(gym.Env):
         for i in range(_actual_total_tokens):
             parent_idx_in_mask_list = _mask_index_list_local[i]
             _tree_mask_bool[i + 1].add_(_tree_mask_bool[parent_idx_in_mask_list])
-            
+
         self.finalized_tree_mask = _tree_mask_bool.float()[None, None]
         self.finalized_tree_position_ids = torch.sum(_tree_mask_bool.int(), dim=1) - 1
 
@@ -474,7 +488,7 @@ class SpeculativeDecodingEnv(gym.Env):
                     retrieve_indices[rid][j] = cid
                     cid = _mask_index_list_local[cid - 1] if cid > 0 else -1
                 rid += 1
-        
+
         self.finalized_retrieve_indices = torch.tensor(retrieve_indices, dtype=torch.long)
 
         # --- 2. Main Model Verification ---
@@ -486,7 +500,7 @@ class SpeculativeDecodingEnv(gym.Env):
 
         # --- 3. Evaluate Posterior ---
         padding_verify = torch.full((1, 1), -1, dtype=torch.long, device=self.device)
-        draft_tokens_padded_verify = torch.cat((self.finalized_draft_tokens, padding_verify), dim=1)
+        draft_tokens_padded_verify = torch.cat((self.finalized_draft_tokens.to(self.device), padding_verify), dim=1)
         _candidates_verify = draft_tokens_padded_verify[0, self.finalized_retrieve_indices.to(self.device)]
         best_candidate_idx, accept_length, sample_p = evaluate_posterior(
             logits_verify, _candidates_verify, self.logits_processor
@@ -514,13 +528,13 @@ class SpeculativeDecodingEnv(gym.Env):
         self.accepted_hidden_state_base_for_next_topk = retrieve_hidden_state_new[:, best_candidate_idx, :self.accept_length + 1]
         self.next_token_sampled_for_next_topk = torch.argmax(sample_p).unsqueeze(0).unsqueeze(0)
         self.real_hidden_state_for_obs = self.accepted_hidden_state_base_for_next_topk[:, -1, :].unsqueeze(1)
-        
+
         self.time += time.time() - start_time_step
-        
+
         # --- 6. Calculate Reward & Termination ---
         reward = (self.accept_length + 1) / (self.time * 100.0 + 1e-6) # Added epsilon for stability
         self.current_episode_rewards.append(reward)
-        
+
         terminated = True
         truncated = False
 
@@ -537,7 +551,7 @@ class SpeculativeDecodingEnv(gym.Env):
             'token_right': float(self.accept_length + 1),
             't_draft': self.time,
             'total_token_chosen_action': total_token_val_action,
-            'depth_chosen': self.random_depth_this_step, 
+            'depth_chosen': self.random_depth_this_step,
             'current_seq_len': self.current_input_ids.shape[1],
             'reward_current_step': reward
         })
@@ -554,12 +568,15 @@ class SpeculativeDecodingEnv(gym.Env):
 
 if __name__ == '__main__':
     run = wandb.init(
-        project="speculative-decoding-rl",  
-        config=args,                        
-        sync_tensorboard=True,              
-        monitor_gym=True,                   
-        save_code=True,                     
+        project="speculative-decoding-rl",
+        config=args,
+        sync_tensorboard=True,
+        monitor_gym=True,
+        save_code=True,
     )
+
+    max_memory = build_max_memory(args.max_memory_gpu, args.max_memory_cpu)
+    print(f"max_memory config: {max_memory}")
 
     model = EaModel.from_pretrained(
         base_model_path=args.base_model_path,
@@ -571,8 +588,9 @@ if __name__ == '__main__':
         total_token=60,
         use_eagle3=True,
         use_dyn_len=False,
-        device_map="auto"
-    )#.to("cuda")
+        device_map="auto",
+        max_memory=max_memory,
+    )
     model.eval()
     tokenizer = model.get_tokenizer()
 
@@ -602,7 +620,7 @@ if __name__ == '__main__':
                 input_ids = tokenizer.encode(prompt_start, add_special_tokens=False, return_tensors="pt")
                 if input_ids.shape[1] <= 1748:
                     input_ids_list.append(input_ids)
-    
+
     # Initialize Environment
     logits_processor = None
     env = SpeculativeDecodingEnv(model, logits_processor, input_ids_list)
@@ -617,7 +635,7 @@ if __name__ == '__main__':
         args.warmup_timesteps,
         args.total_timesteps
     )
-    
+
     checkpoint_path = args.rl_checkpoint_path
     if checkpoint_path and os.path.exists(checkpoint_path):
         print(f"Loading checkpoint from: {checkpoint_path}")
@@ -635,27 +653,27 @@ if __name__ == '__main__':
             env,
             policy_kwargs=policy_kwargs,
             verbose=1,
-            n_steps=args.n_steps, 
-            batch_size=args.batch_size, 
-            n_epochs=args.n_epochs, 
-            gamma=args.gamma, 
+            n_steps=args.n_steps,
+            batch_size=args.batch_size,
+            n_epochs=args.n_epochs,
+            gamma=args.gamma,
             tensorboard_log=os.path.join(args.save_path, "ppo_speculative_tensorboard"),
             device=device,
-            ent_coef=args.ent_coef, 
+            ent_coef=args.ent_coef,
             learning_rate=learning_rate_schedule,
         )
-        
+
     custom_tensorboard_callback = CustomTensorboardCallback(save_freq=args.eval_freq)
     wandb_callback = WandbCallback(
         gradient_save_freq=0,
         verbose=2,
     )
     callback_list = CallbackList([custom_tensorboard_callback, wandb_callback])
-    
+
     print("\nStarting RL training with single action (total_tokens)...")
     model_rl.learn(
-        total_timesteps=args.total_timesteps, 
-        progress_bar=True, 
+        total_timesteps=args.total_timesteps,
+        progress_bar=True,
         callback=callback_list
     )
     print("RL training finished.")
