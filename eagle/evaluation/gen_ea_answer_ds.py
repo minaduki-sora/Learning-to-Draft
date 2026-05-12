@@ -330,10 +330,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ea-model-path",
         type=str,
-        default="/home/v-jiebzhang/hf_models/Eagle-Dpsk-Llama-8B",
+        default="/home/majunjie/code/weights/eagle/EAGLE3-DeepSeek-R1-Distill-LLaMA-8B",
         help="The path to the weights. This can be a local folder or a Hugging Face repo ID.",
     )
-    parser.add_argument("--base-model-path", type=str, default="/home/v-jiebzhang/hf_models/Dpsk-Llama-8B",
+    parser.add_argument("--base-model-path", type=str, default="/home/majunjie/code/weights/hf/DeepSeek-R1-Distill-Llama-8B",
                         help="1")
     parser.add_argument(
         "--load-in-8bit", action="store_false", help="Use 8-bit quantization"
